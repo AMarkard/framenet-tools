@@ -28,7 +28,16 @@ class RoleIdNetwork(object):
         self.device = torch.device("cuda" if use_cuda else "cpu")
         logging.debug(f"Device used: {self.device}")
 
-    def train_network(self, train_set, dev_set):
+    def train_network(self, train_xs: List[List[int]], train_ys: List[int], dev_xs: List[List[int]], dev_ys: List[int]):
+        """
+        Train the network
 
-        # Stub
+        :param train_xs:
+        :param train_ys:
+        :param dev_xs:
+        :param dev_ys:
+        :return:
+        """
+
+
         return

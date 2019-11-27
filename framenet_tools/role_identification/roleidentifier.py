@@ -37,6 +37,7 @@ class RoleIdentifier(object):
         self.input_field = data.Field(
             dtype=torch.long, use_vocab=True, preprocessing=None
         )
+        self.role_dict = dict()
 
     def predict_roles(self, annotation: Annotation):
         """
@@ -60,10 +61,12 @@ class RoleIdentifier(object):
 
         embedding_layer = self.gen_embedding_layer(m_reader)
 
-        train_set = self.get_dataset(m_reader)
-        dev_set = self.get_dataset(m_reader_dev)
+        train_xs, train_ys = self.get_dataset(m_reader)
+        dev_xs, dev_ys = self.get_dataset(m_reader_dev)
 
         self.network = RoleIdNetwork(self.cM, embedding_layer)
+
+        self.network.train_network(train_xs, train_ys, dev_xs, dev_ys)
 
     def gen_embedding_layer(self, reader: DataReader):
         """
@@ -103,11 +106,46 @@ class RoleIdentifier(object):
 
         return embed
 
-    def get_dataset(self, reader: DataReader):
+    def get_role_id(self, role: str):
         """
+        Gets the id for a given role.
 
-        :param reader:
+        NOTE: Generated on the fly,
+              also consistency not guaranteed between different runs.
+        :param role:
         :return:
         """
 
-        # Stub
+        if role not in self.role_dict:
+            self.role_dict[role] = len(self.role_dict)
+
+        return self.role_dict[role]
+
+    def get_dataset(self, reader: DataReader):
+        """
+        Generates the dataset required for training.
+
+        :param reader: The reader object, containing a fully annotaded dateset
+        :return: Two concurrent lists of x and ys
+        """
+
+        xs = []
+        ys = []
+
+        for annotation in reader.annotations:
+            for role, role_poistion in zip(annotation.roles, annotation.role_positions):
+                #annotation.embedded_frame
+                #annotation.frame
+                #annotation.sentence
+                x = [
+                    self.input_field.vocab.stoi(annotation.fee_raw),
+                    role_poistion
+                    ]
+
+                y = self.get_role_id(role)
+
+                xs.append(x)
+                ys.append(y)
+
+        return xs, ys
+
