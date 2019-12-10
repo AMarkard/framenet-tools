@@ -8,8 +8,19 @@ from torch.autograd import Variable
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from typing import List
+from allennlp.commands.elmo import ElmoEmbedder
 
 from framenet_tools.config import ConfigManager
+
+
+def gen_batch(iterable, n=1):
+    """
+
+    Source: https://stackoverflow.com/questions/8290397/how-to-split-an-iterable-in-constant-size-chunks
+    """
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
 
 
 class Net(nn.Module):
@@ -19,15 +30,15 @@ class Net(nn.Module):
         hidden_sizes: list,
         activation_functions: list,
         num_classes: int,
-        embedding_layer: torch.nn.Embedding,
         device: torch.device,
     ):
         super(Net, self).__init__()
 
         self.device = device
-        self.embedding_layer = embedding_layer
 
         self.hidden_layers = []
+
+        self.embedder = ElmoEmbedder()
 
         last_size = embedding_size * 2
 
@@ -59,15 +70,6 @@ class Net(nn.Module):
 
         self.out_layer = nn.Linear(last_size, num_classes)
 
-    def set_embedding_layer(self, embedding_layer: torch.nn.Embedding):
-        """
-        Setter for the embedding_layer
-
-        :param embedding_layer: The new embedding_layer
-        :return:
-        """
-        self.embedding_layer = embedding_layer
-
     def average_sentence(self, sent: torch.tensor):
         """
         Averages a sentence/multiple sentences by taking the mean of its embeddings
@@ -82,14 +84,10 @@ class Net(nn.Module):
 
         for sentence in lookup_tensor:
 
-            # Cut off padding from torchtext, as it messes up the averaging process!
-            sentence = sentence[: (sentence != 1).nonzero()[-1].item() + 1]
-            embedded_sent = self.embedding_layer(sentence)
-
-            averaged_sent = embedded_sent.mean(dim=0)
+            averaged_sent = sentence.mean(dim=0)
 
             # Reappend the FEE
-            inc_FEE = torch.cat((embedded_sent[0], averaged_sent), 0)
+            inc_FEE = torch.cat((sentence[0], averaged_sent), 0)
             appended_avg.append(inc_FEE)
 
         averaged_sent = torch.stack(appended_avg)
@@ -104,7 +102,14 @@ class Net(nn.Module):
         :return: The prediction of the network
         """
 
-        x = torch.transpose(x, 0, 1)
+        embedded = list()
+
+        for t in x:
+            embedded.append(self.embedder.embed_sentence(t))
+
+        embedded = torch.tensor(embedded)
+
+        x = torch.transpose(embedded, 0, 1)
         x = Variable(self.average_sentence(x)).to(self.device)
 
         # Programmatically pass x through all layers
@@ -119,7 +124,7 @@ class Net(nn.Module):
 
 class FrameIDNetwork(object):
     def __init__(
-        self, cM: ConfigManager, embedding_layer: torch.nn.Embedding, num_classes: int
+        self, cM: ConfigManager, num_classes: int
     ):
 
         self.cM = cM
@@ -129,7 +134,6 @@ class FrameIDNetwork(object):
         self.device = torch.device("cuda" if use_cuda else "cpu")
         logging.debug(f"Device used: {self.device}")
 
-        self.embedding_layer = embedding_layer
         self.num_classes = num_classes
 
         self.net = Net(
@@ -137,7 +141,6 @@ class FrameIDNetwork(object):
             self.cM.hidden_sizes,
             self.cM.activation_functions,
             num_classes,
-            embedding_layer,
             self.device,
         )
 
@@ -151,9 +154,10 @@ class FrameIDNetwork(object):
 
     def train_model(
         self,
-        dataset_size: int,
-        train_iter: torchtext.data.Iterator,
-        dev_iter: torchtext.data.Iterator = None,
+        xs: List[List[str]],
+        ys: List[List[str]],
+        dev_xs: List[List[str]] = None,
+        dev_ys: List[List[str]] = None
     ):
         """
         Trains the model with the given dataset
@@ -166,8 +170,10 @@ class FrameIDNetwork(object):
         :return:
         """
 
+        dataset_size = len(xs)
+
         highest_acc = 0
-        auto_stopper = self.cM.autostopper and dev_iter is not None
+        auto_stopper = self.cM.autostopper and dev_xs is not None
         last_improvement = 0
         autostopper_threshold = self.cM.autostopper_threshold
 
@@ -179,12 +185,15 @@ class FrameIDNetwork(object):
             total_hits = 0
             count = 0
 
-            progress_bar = tqdm(train_iter)
+            xs = gen_batch(xs, self.cM.batch_size)
+            ys = gen_batch(ys, self.cM.batch_size)
+
+            progress_bar = tqdm(zip(xs, ys))
 
             for batch in progress_bar:
 
-                sent = batch.Sentence
-                labels = Variable(batch.Frame[0]).to(self.device)
+                sent = batch[0]
+                labels = Variable(torch.tensor(batch[1])).to(self.device)
 
                 # Forward + Backward + Optimize
                 self.optimizer.zero_grad()  # zero the gradient buffer
@@ -212,7 +221,7 @@ class FrameIDNetwork(object):
             train_loss = total_loss / count
             train_acc = total_hits / count
 
-            if dev_iter is None:
+            if dev_xs is None:
                 logging.info(f"Train Acc: {train_acc}, Train Loss: {train_loss}")
 
                 writer.add_scalars("data/loss", {"train_loss": train_loss}, epoch)
@@ -220,7 +229,7 @@ class FrameIDNetwork(object):
                 writer.add_scalars("data/acc", {"train_acc": train_acc}, epoch)
                 continue
 
-            dev_acc, dev_loss = self.eval_model(dev_iter)
+            dev_acc, dev_loss = self.eval_model(dev_xs)
 
             last_improvement += 1
 

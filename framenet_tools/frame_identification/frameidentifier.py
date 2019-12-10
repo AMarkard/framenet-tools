@@ -9,6 +9,7 @@ from torch.nn.functional import softmax
 from torchtext import data
 import pickle
 from typing import List
+from allennlp.commands.elmo import ElmoEmbedder
 
 from framenet_tools.data_handler.annotation import Annotation
 from framenet_tools.data_handler.reader import DataReader
@@ -16,6 +17,24 @@ from framenet_tools.fee_identification.feeidentifier import FeeIdentifier
 from framenet_tools.frame_identification.frameidnetwork import FrameIDNetwork
 from framenet_tools.config import ConfigManager
 from framenet_tools.utils.static_utils import shuffle_concurrent_lists
+
+
+def to_one_hot(l: List[int]):
+    """
+    Helper Function that converts a list of numerals into a list of one-hot encoded vectors
+
+    :param l: The list to convert
+    :return: A list of one-hot vectors
+    """
+
+    max_val = max(l)
+
+    one_hots = [[0] * max_val] * len(l)
+
+    for i in range(len(l)):
+        one_hots[i][l[i]] = 1
+
+    return one_hots
 
 
 def get_dataset(reader: DataReader):
@@ -36,6 +55,22 @@ def get_dataset(reader: DataReader):
             ys.append(annotation.frame)
 
     return xs, ys
+
+
+def gen_dict(t: List[str], m_dict: dict = dict()):
+    """
+
+    """
+
+    m_list = list()
+
+    for element in t:
+        if element not in m_dict:
+            m_dict[element] = len(m_dict)
+
+        m_list.append(m_dict[element])
+
+    return m_dict, m_list
 
 
 class FrameIdentifier(object):
@@ -319,45 +354,25 @@ class FrameIdentifier(object):
         :return:
         """
 
-        xs = []
-        ys = []
-
-        new_xs, new_ys = get_dataset(reader)
-        xs += new_xs
-        ys += new_ys
+        xs, ys = get_dataset(reader)
 
         shuffle_concurrent_lists([xs, ys])
 
-        # Zip datasets and generate complete dictionary
-        examples = [
-            data.Example.fromlist([x, y], self.data_fields) for x, y in zip(xs, ys)
-        ]
+        dev_xs, dev_ys = get_dataset(reader_dev)
 
-        dataset = data.Dataset(examples, fields=self.data_fields)
+        num_classes = len(list(set(ys + dev_ys)))
 
-        self.input_field.build_vocab(dataset)
-        self.output_field.build_vocab(dataset)
+        self.network = FrameIDNetwork(self.cM, num_classes)
 
-        dataset_size = len(xs)
-
-        train_iter = self.prepare_dataset(xs, ys)
-
-        dev_iter = self.get_iter(reader_dev)
-
-        self.input_field.vocab.load_vectors("glove.6B.300d")
-
-        num_classes = len(self.output_field.vocab)
-
-        embed = nn.Embedding.from_pretrained(self.input_field.vocab.vectors)
-
-        self.network = FrameIDNetwork(self.cM, embed, num_classes)
-
-        if dev_iter is None:
+        if reader_dev is None:
             logging.info(
                 f"NOTE: Beginning training w/o a development set! Autostopper deactivated!"
             )
 
-        self.network.train_model(dataset_size, train_iter, dev_iter)
+        m_dict, ys = gen_dict(ys)
+        m_dict, dev_ys = gen_dict(dev_ys, m_dict)
+
+        self.network.train_model(xs, ys, dev_xs, dev_ys)
 
     def get_iter(self, reader: DataReader):
         """
@@ -373,3 +388,4 @@ class FrameIdentifier(object):
         xs, ys = get_dataset(reader)
 
         return self.prepare_dataset(xs, ys)
+
